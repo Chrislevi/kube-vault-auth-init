@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-
+set -x
 set -eo pipefail
 
 validateVaultResponse () {
@@ -20,25 +20,25 @@ fi
 echo "Getting auth token from Vault server: ${VAULT_ADDR} ${KUBE_SA_TOKEN}"
 
 # Login to Vault and so I can get an approle token
-VAULT_LOGIN_TOKEN=$(curl -sSk --request POST \
+VAULT_LOGIN_TOKEN=$(curl -sS --insecure --request POST \
   ${VAULT_ADDR}/v1/auth/${KUBERNETES_AUTH_PATH}/login \
   -H "Content-Type: application/json" \
   -d '{"role":"'"${VAULT_LOGIN_ROLE}"'","jwt":"'"${KUBE_SA_TOKEN}"'"}' | \
   jq -r 'if .errors then . else .auth.client_token end')
 validateVaultResponse 'vault login token' "${VAULT_LOGIN_TOKEN}"
 
-VAULT_ROLE_ID=$(curl -sSk --header "X-Vault-Token: ${VAULT_LOGIN_TOKEN}" \
+VAULT_ROLE_ID=$(curl -sS --insecure --header "X-Vault-Token: ${VAULT_LOGIN_TOKEN}" \
   ${VAULT_ADDR}/v1/auth/approle/role/${VAULT_LOGIN_ROLE}/role-id | \
   jq -r 'if .errors then . else .data.role_id end')
 validateVaultResponse 'role id' "${VAULT_ROLE_ID}"
 
-VAULT_SECRET_ID=$(curl -sSk --header "X-Vault-Token: ${VAULT_LOGIN_TOKEN}" \
+VAULT_SECRET_ID=$(curl -sS --insecure --header "X-Vault-Token: ${VAULT_LOGIN_TOKEN}" \
   --request POST \
   ${VAULT_ADDR}/v1/auth/approle/role/${VAULT_LOGIN_ROLE}/secret-id | \
   jq -r 'if .errors then . else .data.secret_id end')
 validateVaultResponse 'secret id' "${VAULT_SECRET_ID}"
 
-APPROLE_TOKEN=$(curl -sSk --request POST \
+APPROLE_TOKEN=$(curl -sS --insecure --request POST \
   --data '{"role_id":"'"$VAULT_ROLE_ID"'","secret_id":"'"$VAULT_SECRET_ID"'"}' \
   ${VAULT_ADDR}/v1/auth/approle/login | \
   jq -r 'if .errors then . else .auth.client_token end')
@@ -52,6 +52,7 @@ echo "Getting secrets from Vault"
 
 # Get all environment variables prefixed with SECRET_ and retrieve the secret from vault based on the value
 INJECTED_SECRET_KEYS=$(printenv | grep '^SECRET_' | awk -F "=" '{print $1}')
+echo '{}' > /env/variables.json
 
 for key in ${INJECTED_SECRET_KEYS}
 do
@@ -62,7 +63,7 @@ do
  vault_data_key=$(echo ${value} |awk -F "?" '{print $2}')
  [[ -z ${vault_data_key} ]] &&  vault_data_key=value
 
- LOOKUP_SECRET_RESPONSE=$(curl -sSk \
+ LOOKUP_SECRET_RESPONSE=$(curl -sS --insecure \
     --header "X-Vault-Token: ${APPROLE_TOKEN}" \
     ${VAULT_ADDR}/v1/${vault_secret_key} | \
       jq -r 'if .errors then . else . end')
@@ -77,6 +78,8 @@ do
             LEASE_IDS="${LEASE_ID}"
         fi
     fi
+    cat /env/variables.json | jq  ". += {\"$ACTUAL_KEY\":  \"$VALUE_OF_SECRET\"}" | tee /env/variables.json
+    echo "${ACTUAL_KEY}: '${VALUE_OF_SECRET}'" >> /env/variables.yaml
     echo "export ${ACTUAL_KEY}=${VALUE_OF_SECRET}" >> /env/variables
 done
 
